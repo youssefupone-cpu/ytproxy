@@ -137,11 +137,11 @@ pub fn rewrite_html(
     let mut settings = Settings::default();
     settings.memory_settings.max_allowed_memory_usage = max_bytes;
 
-    // الروابط في السمات الشائعة
+    // الروابط في السمات الشائعة (action للنماذج له معالجة مخصصة أدناه)
     settings.element_content_handlers.push(element!(
-        "[href], [src], [action], [poster]",
+        "[href], [src], [poster]",
         |el| {
-            for attr in ["href", "src", "action", "poster"] {
+            for attr in ["href", "src", "poster"] {
                 if let Some(val) = el.get_attribute(attr) {
                     if should_rewrite(&val) {
                         if let Some(p) = proxy_url(proxy_origin, target, &val) {
@@ -153,6 +153,29 @@ pub fn rewrite_html(
             Ok(())
         }
     ));
+
+    // النماذج: المتصفح يستبدل query الـ action بحقول النموذج عند الإرسال، لذا
+    // ?url= في action تُمسح (خطأ "Missing ?url=" في بحث قوقل). ننقل الهدف إلى
+    // حقل مخفي name=url ونترك action = /proxy — تُدمج حقول النموذج في الهدف
+    // لاحقاً في proxy_request (دمج query الطلب).
+    settings.element_content_handlers.push(element!("form", |el| {
+        let val = el.get_attribute("action").unwrap_or_default();
+        let rewritten = if val.trim().is_empty() || val.trim() == "#" {
+            // إرسال لنفس الصفحة: الهدف هو الصفحة الحالية
+            Some(format!("{proxy_origin}/proxy?url={}", proxy_encode(target.as_str())))
+        } else {
+            proxy_url(proxy_origin, target, &val)
+        };
+        if let Some(p) = rewritten {
+            if let Some((base, enc)) = p.split_once("url=") {
+                let base = base.trim_end_matches('?');
+                let _ = el.set_attribute("action", base);
+                let hidden = format!(r#"<input type="hidden" name="url" value="{enc}">"#);
+                let _ = el.prepend(&hidden, ContentType::Html);
+            }
+        }
+        Ok(())
+    }));
 
     // srcset (صور متجاوبة)
     settings.element_content_handlers.push(element!("[srcset]", |el| {

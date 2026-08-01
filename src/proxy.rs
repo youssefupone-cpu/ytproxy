@@ -992,6 +992,7 @@ impl Proxy {
         };
 
         let status = out["status"].as_u64().unwrap_or(500) as u16;
+        log::info!("SIDECAR {} {} -> {}", method, target, status);
         let out_headers = out["headers"].as_object().cloned().unwrap_or_default();
         let body_raw = out["body_b64"]
             .as_str()
@@ -1114,7 +1115,9 @@ impl Proxy {
         // 3) الطلب الذاتي: JS المواقع يبني روابط نسبية بـ location.host (نطاقنا)
         //    فترتد إلينا. نستخرج الأصل الحقيقي من Referer ونعيد توجيه الطلب.
         let mut target = target;
+        let mut was_self = false;
         if is_self_origin(&target, &proxy_origin) {
+            was_self = true;
             let refdbg = req
                 .headers()
                 .get("referer")
@@ -1130,6 +1133,30 @@ impl Proxy {
                         .body(bytes_body(Bytes::new()))
                         .unwrap_or_else(|_| internal_error());
                 }
+            }
+        }
+
+        // 3أ) دمج query الطلب في الهدف (عدا مسار self الذي حفظها resolve_self_target
+        //     بالفعل): النماذج بعد إعادة الكتابة ترسل /proxy + حقل مخفي url،
+        //     وحقولها (q=... للبحث) تصل في query الطلب — نلحقها بالهدف.
+        if !was_self {
+            let mut merged: Vec<(String, String)> = Vec::new();
+            if let Some(tq) = target.query() {
+                merged.extend(
+                    url::form_urlencoded::parse(tq.as_bytes()).map(|(k, v)| (k.into_owned(), v.into_owned())),
+                );
+            }
+            for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+                if matches!(k.as_ref(), "url" | "password" | "raw") {
+                    continue;
+                }
+                merged.push((k.into_owned(), v.into_owned()));
+            }
+            if !merged.is_empty() {
+                let qs = url::form_urlencoded::Serializer::new(String::new())
+                    .extend_pairs(&merged)
+                    .finish();
+                target.set_query(Some(&qs));
             }
         }
 
@@ -1170,6 +1197,17 @@ impl Proxy {
             if req.headers().get("user-agent").is_none() {
                 base_headers.push(("user-agent", DEFAULT_UA.to_string()));
             }
+        }
+
+        // بحث جوجل: reqwest يردّ 429 "unusual traffic" بينما urllib/openssl
+        // (sidecar) مقبول — نمرر كل طلبات /search عبر الـ sidecar.
+        let is_gsearch = target
+            .host_str()
+            .map(|h| h == "www.google.com" || h == "google.com" || h.ends_with(".google.com"))
+            .unwrap_or(false)
+            && target.path().starts_with("/search");
+        if is_gsearch {
+            return self.sidecar(req, target.as_str()).await;
         }
 
         // بث googlevideo: يرفض طلبات بلا Accept-Language صحيحة أو التي تطلب
