@@ -1136,6 +1136,12 @@ impl Proxy {
         // 4) بناء الطلب الخارجي
         let method = req.method().clone();
         let is_yt = is_yt_host(target.host_str().unwrap_or(""));
+        // فيسبوك يرد 400 على "UA يدّعي متصفحاً + بصمة اتصال غير متصفحة" (قاعدة
+        // SLB فورية). نرسل له UA صادقاً بدل تمرير UA المتصفح — موثق في docs/حلول.md#5.
+        let is_fb = target
+            .host_str()
+            .map(|h| h.ends_with("facebook.com") || h.ends_with("fbcdn.net"))
+            .unwrap_or(false);
         let is_player_api = target.path().contains("youtubei/v1/player")
             || target.path().contains("youtubei/v1/next");
 
@@ -1190,6 +1196,9 @@ impl Proxy {
             }
             if let Some(value) = req.headers().get(name) {
                 if let Ok(s) = value.to_str() {
+                    if is_fb && name == "user-agent" {
+                        continue;
+                    }
                     if name == "cookie" {
                         let cleaned = strip_auth_cookie(s);
                         if !cleaned.is_empty() {
@@ -1202,8 +1211,12 @@ impl Proxy {
             }
         }
 
-        // UA افتراضي إن لم يرسله العميل (curl/سكربتات) — يمنع 403 من جوجل
-        if req.headers().get("user-agent").is_none() {
+        // UA افتراضي: curl/سكربتات بلا UA → UA متصفح (يمنع 403 من جوجل).
+        // فيسبوك بالعكس: نرسل دائماً UA صادقاً (المتصفح ممرَّر أُسقط أعلاه)
+        // لأن بصمة خروجنا ليست بصمة متصفح → 400 مع UA متصفح (مثبت تجريبياً).
+        if is_fb {
+            base_headers.push(("user-agent", "curl/8.5.0".to_string()));
+        } else if req.headers().get("user-agent").is_none() {
             base_headers.push(("user-agent", DEFAULT_UA.to_string()));
         }
 
