@@ -16,13 +16,22 @@
 
 - Rust (edition 2021)
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) في `/usr/local/bin/yt-dlp` (يُستخدم كمنتج روابط — يدير فك تشفير `nsig` بنفسه عبر `player_client=web_safari`)
+- Python 3 (للـ sidecar — مطلوب لبحث جوجل وتوليد po_token)
 
 ## التشغيل
 
 ```bash
+# 1) الـ sidecar (نافذة/جلسة أولى): يمرر طلبات بحث جوجل و po_token
+python3 scripts/sidecar.py
+
+# 2) الوكيل (جلسة ثانية):
 export PROXY_PASSWORD="كلمة-سر-قوية"
 RUST_LOG=info PORT=8081 cargo run --release
 ```
+
+> ملاحظة مهمة: ابحث عبر جوجل من **شبكة منزلية** (IP سكني) — خوادم الاستضافة (AWS/OVH/VPS...)
+> محجوبة من نتائج بحث محركات البحث كافة (تظهر صفحة "unusual traffic") حتى لو فتحت
+> جوجل مباشرة بلا وكيل من نفس الخادم. على IP منزلي يعمل البحث طبيعياً.
 
 للاختبار المحلي:
 
@@ -64,6 +73,7 @@ curl "http://127.0.0.1:8081/ytstream-hls?video=dQw4w9WgXcQ&quality=hls-720"
 
 ## الإصدارات
 
+- **v1.1.2** — إصلاح نماذج البحث ("Missing ?url=": النماذج الآن `action=/proxy` + حقل مخفي `url` بدل `?url=` داخل action الذي كان المتصفح يمسحه عند الإرسال) + دمج query النموذج في الهدف + تمرير بحث جوجل عبر sidecar + توثيق التشغيل المنزلي.
 - **v1.1.0** — إضافة `/ytstream` (بث MP4) و `/ytstream-hls` (بث متعدد الجودات عبر sidecar yt-dlp) + مشغل في الصفحة الرئيسية.
 - **v1.0.0** — الوكيل العام (تصفح، cookies، Range، حماية، HTTPS).
 
