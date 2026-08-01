@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>متصفحي السريع</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: 'Segoe UI', Tahoma, sans-serif; background: #0a0f1a; color: #e0e8ff; display:flex; justify-content:center; align-items:center; min-height:100vh; direction:rtl; padding:20px; }
+.container { background: linear-gradient(145deg, #1a2236, #131b2c); border-radius:28px; padding:35px; width:100%; max-width:560px; box-shadow:0 30px 60px rgba(0,0,0,0.6); border:1px solid #2a3550; }
+h1 { text-align:center; margin-bottom:8px; font-size:2rem; color:#60a5fa; font-weight:700; }
+p.sub { text-align:center; color:#64748b; margin-bottom:25px; font-size:.9rem; }
+.shortcuts { display:flex; gap:10px; flex-wrap:wrap; justify-content:center; margin-bottom:25px; }
+.shortcuts a { background:#1e293b; padding:12px 18px; border-radius:14px; text-decoration:none; color:#cbd5e1; font-weight:600; transition:.25s; border:1px solid #2d3a52; font-size:.9rem; }
+.shortcuts a:hover { background:#3b82f6; color:white; border-color:#60a5fa; transform:translateY(-2px); }
+.input-row { display:flex; gap:12px; }
+#url { flex:1; padding:14px 18px; border:none; border-radius:14px; background:#0f172a; color:white; font-size:16px; outline:none; border:1px solid #2d3a52; min-width:0; }
+#url:focus { border-color:#3b82f6; }
+button { padding:14px 26px; background:#3b82f6; border:none; border-radius:14px; color:white; font-weight:bold; cursor:pointer; font-size:16px; transition:.2s; }
+button:hover { background:#2563eb; }
+h2 { font-size:1rem; color:#94a3b8; margin:28px 0 12px; }
+.demo { display:flex; flex-direction:column; gap:10px; }
+.demo a { background:#0f172a; border:1px solid #2d3a52; border-radius:14px; padding:12px 16px; color:#cbd5e1; text-decoration:none; font-size:.9rem; transition:.2s; }
+.demo a:hover { border-color:#3b82f6; color:#93c5fd; }
+.demo a small { display:block; color:#64748b; margin-top:3px; font-size:.78rem; }
+.play-status { min-height:20px; color:#93c5fd; font-size:.85rem; text-align:center; padding:6px 0; }
+select { padding:14px 12px; border:none; border-radius:14px; background:#0f172a; color:white; font-size:15px; outline:none; border:1px solid #2d3a52; }
+.note { margin-top:25px; font-size:.8rem; color:#64748b; text-align:center; line-height:1.7; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🌐 متصفحي السريع</h1>
+  <p class="sub">بوابة تصفح موحّدة — مباشرة وسريعة وبلا إعلانات</p>
+  <div class="shortcuts">
+    <a href="/proxy?url=https://www.youtube.com" target="_blank">▶️ يوتيوب</a>
+    <a href="/proxy?url=https://www.facebook.com" target="_blank">📘 فيسبوك</a>
+    <a href="/proxy?url=https://x.com" target="_blank">𝕏 تويتر</a>
+    <a href="/proxy?url=https://www.wikipedia.org" target="_blank">📚 ويكيبيديا</a>
+    <a href="/proxy?url=https://www.google.com" target="_blank">🔎 غوغل</a>
+  </div>
+  <div class="input-row">
+    <input type="text" id="url" placeholder="ضع الرابط هنا...">
+    <button onclick="navigate()">فتح</button>
+  </div>
+  <h2>مشغل يوتيوب عبر الخادم (HLS)</h2>
+  <div class="demo">
+    <div class="input-row">
+      <input type="text" id="videoId" placeholder="معرف الفيديو أو رابط يوتيوب... (مثال dQw4w9WgXcQ)" dir="ltr" style="text-align:left;">
+      <select id="quality">
+        <option value="hls-1080">1080p</option>
+        <option value="hls-720" selected>720p</option>
+        <option value="hls-480">480p</option>
+        <option value="hls-360">360p</option>
+        <option value="hls-240">240p</option>
+        <option value="hls-144">144p</option>
+        <option value="hls/best">الأفضل تلقائياً</option>
+      </select>
+      <button onclick="playVideo()">تشغيل</button>
+    </div>
+    <video id="player" controls preload="auto" playsinline
+      style="width:100%; border-radius:14px; background:#000; display:none;"></video>
+    <div id="playStatus" class="play-status"></div>
+  </div>
+  <div class="note">اتصالك مشفر وآمن. لا نسجل أي نشاط. البث يمر عبر نطاقات Range مباشرة دون تخزين.</div>
+</div>
+<script>
+function navigate() {
+  let url = document.getElementById('url').value.trim();
+  if (!url) return;
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+  window.open('/proxy?url=' + encodeURIComponent(url), '_blank');
+}
+function extractVideoId(v) {
+  v = v.trim();
+  if (/^[A-Za-z0-9_-]{11}$/.test(v)) return v;
+  const m = v.match(/[?&]v=([A-Za-z0-9_-]{11})/) || v.match(/(?:youtu\.be\/|youtube\.com\/watch\?v=)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : '';
+}
+function playVideo() {
+  const id = extractVideoId(document.getElementById('videoId').value);
+  const q = document.getElementById('quality').value;
+  const status = document.getElementById('playStatus');
+  const player = document.getElementById('player');
+  if (!id) { status.textContent = '⚠️ معرف فيديو غير صالح'; return; }
+  status.textContent = '⏳ جارٍ التحميل...';
+  player.style.display = 'block';
+  player.src = '/ytstream-hls?video=' + id + '&quality=' + q;
+  player.play().catch(() => {});
+  player.addEventListener('playing', () => { status.textContent = '▶️ يعمل الآن (' + player.videoWidth + '×' + player.videoHeight + ')'; });
+  player.addEventListener('error', () => { status.textContent = '❌ فشل التشغيل: ' + (player.error ? player.error.message : 'غير معروف'); });
+}
+document.getElementById('url').addEventListener('keypress', e => { if (e.key==='Enter') navigate(); });
+document.getElementById('videoId').addEventListener('keypress', e => { if (e.key==='Enter') playVideo(); });
+</script>
+</body>
+</html>
