@@ -929,8 +929,25 @@ impl Proxy {
     /// البروتوكول: POST http://127.0.0.1:8090/f
     ///   {"method","url","headers":{...},"body_b64":"..."}
     ///   ← {"status", "headers":{...}, "body_b64":"..."}
-    async fn sidecar(&self, req: Request<Incoming>, target: &str) -> Response<RespBody> {
+    async fn sidecar(&self, req: Request<Incoming>, target: &str, proxy_origin: &str) -> Response<RespBody> {
         let method = req.method().as_str().to_string();
+
+        // أصل الوكيل قد يُمرَّر جاهزاً؛ إن كان فارغاً (كتلة Waa) نحسبه من الطلب.
+        let origin = if proxy_origin.is_empty() {
+            let proto = req
+                .headers()
+                .get("x-forwarded-proto")
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("http");
+            let host = req
+                .headers()
+                .get("host")
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("localhost");
+            format!("{proto}://{host}")
+        } else {
+            proxy_origin.to_string()
+        };
 
         let mut headers = serde_json::Map::new();
         let auth_enabled = self.config.proxy_password.is_some();
@@ -994,19 +1011,47 @@ impl Proxy {
         let status = out["status"].as_u64().unwrap_or(500) as u16;
         log::info!("SIDECAR {} {} -> {}", method, target, status);
         let out_headers = out["headers"].as_object().cloned().unwrap_or_default();
-        let body_raw = out["body_b64"]
+        let body_raw0 = out["body_b64"]
             .as_str()
             .and_then(|s| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s).ok())
             .unwrap_or_default();
 
+        // صفحات HTML القادمة من sidecar (مثل حاجز "unusual traffic") تُعاد
+        // كتابتها مثل أي صفحة — وإلا بقيت روابط recaptcha مطلقة لـ google.com
+        // وخرجت من المتصفح مباشرة (بلا وكيل) فيظهر خطأ "النطاق غير صالح لمفتاح الموقع".
+        let mut body_raw = body_raw0;
+        let mut rewrote = false;
+        let is_html_ct = out_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .and_then(|(_, v)| v.as_str())
+            .map(|s| s.contains("text/html"))
+            .unwrap_or(false);
+        if is_html_ct {
+                if let Ok(tu) = Url::parse(target) {
+                    if let Some(rewritten) =
+                        rewrite_html(&body_raw, &tu, &origin, self.config.text_max_bytes)
+                    {
+                        body_raw = rewritten;
+                        rewrote = true;
+                    }
+                }
+        }
+
         let mut builder = Response::builder().status(status);
         for (k, v) in out_headers {
+            if rewrote && k.eq_ignore_ascii_case("content-type") {
+                continue;
+            }
             if let (Ok(kh), Ok(vh)) = (
                 http::HeaderName::from_bytes(k.as_bytes()),
                 http::HeaderValue::from_str(v.as_str().unwrap_or("")),
             ) {
                 builder = builder.header(kh, vh);
             }
+        }
+        if rewrote {
+            builder = builder.header("content-type", "text/html; charset=utf-8");
         }
         cors_headers(builder)
             .header("x-ytproxy-via", "sidecar")
@@ -1080,7 +1125,7 @@ impl Proxy {
             })
             .unwrap_or(false)
         {
-            return self.sidecar(req, target.as_str()).await;
+            return self.sidecar(req, target.as_str(), "").await;
         }
 
         // x-ytproxy-tls: وضعناه الخادم نفسه عند الخدمة عبر TLS مباشرة (لا نثق به من الخارج)
@@ -1199,6 +1244,13 @@ impl Proxy {
             }
         }
 
+        // reCAPTCHA عبر الوكيل: نطاقنا (مثل *.trycloudflare.com) غير مسجل لدى
+        // جوجل → تظهر رسالة "خطأ لمالك الموقع. النطاق غير صالح لمفتاح الموقع."
+        // نُعطّل الـ recaptcha بصمت (نرد نصاً فارغاً) — لا تؤثر على التصفح العادي.
+        if is_recaptcha_target(&target) {
+            return recaptcha_stub(&target);
+        }
+
         // بحث جوجل: reqwest يردّ 429 "unusual traffic" بينما urllib/openssl
         // (sidecar) مقبول — نمرر كل طلبات /search عبر الـ sidecar.
         let is_gsearch = target
@@ -1207,7 +1259,7 @@ impl Proxy {
             .unwrap_or(false)
             && target.path().starts_with("/search");
         if is_gsearch {
-            return self.sidecar(req, target.as_str()).await;
+            return self.sidecar(req, target.as_str(), &proxy_origin).await;
         }
 
         // بث googlevideo: يرفض طلبات بلا Accept-Language صحيحة أو التي تطلب
@@ -1759,6 +1811,38 @@ const LOGIN_HTML: &str = r#"<!DOCTYPE html>
 </html>"#;
 
 use http::header::{HeaderValue, SET_COOKIE};
+
+/// هل الهدف طلب reCAPTCHA (أي جزء من شيفرته — JS/HTML/صور/iframe anchor)؟
+fn is_recaptcha_target(target: &Url) -> bool {
+    let host = target.host_str().unwrap_or("");
+    let path = target.path();
+    host.contains("recaptcha")
+        || path.contains("/recaptcha/")
+        || (host.ends_with("gstatic.com") && path.contains("/recaptcha/"))
+        || path.contains("/api2/")
+        || (host.ends_with("google.com") && path.starts_with("/recaptcha"))
+}
+
+/// رد وهمي صامت لمحتوى reCAPTCHA — يوقف رسالة "خطأ لمالك الموقع:
+/// النطاق غير صالح لمفتاح الموقع" (نطاق الوكيل غير مسجل لدى جوجل).
+fn recaptcha_stub(target: &Url) -> Response<RespBody> {
+    let ct = if target.path().ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if target.path().ends_with(".js") || target.path().contains("enterprise") {
+        "application/javascript; charset=utf-8"
+    } else if target.path().contains("/logo_") {
+        "image/svg+xml"
+    } else {
+        "text/html; charset=utf-8"
+    };
+    log::info!("RECAPTCHA-STUB {}", target.as_str());
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", ct)
+        .header("x-ytproxy-via", "recaptcha-stub")
+        .body(bytes_body(Bytes::new()))
+        .unwrap_or_else(|_| internal_error())
+}
 
 #[cfg(test)]
 mod tests {

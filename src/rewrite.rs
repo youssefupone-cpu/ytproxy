@@ -177,6 +177,27 @@ pub fn rewrite_html(
         Ok(())
     }));
 
+    // meta refresh (إعادة توجيه تلقائية — مثل حاجز enablejs لدى جوجل):
+    // `0;url=/httpservice/...` — نعيد كتابة الـ url حتى لا يرتد المتصفح
+    // لمسار نسبي على نطاق الوكيل نفسه (404).
+    settings.element_content_handlers.push(element!("meta", |el| {
+        let hv = el.get_attribute("http-equiv").unwrap_or_default();
+        if hv.eq_ignore_ascii_case("refresh") {
+            if let Some(content) = el.get_attribute("content") {
+                if let Some(pos) = content.find("url=") {
+                    let rest = &content[pos + 4..];
+                    if should_rewrite(rest) {
+                        if let Some(p) = proxy_url(proxy_origin, target, rest) {
+                            let new_content = format!("{};url={}", &content[..pos], p);
+                            let _ = el.set_attribute("content", &new_content);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }));
+
     // srcset (صور متجاوبة)
     settings.element_content_handlers.push(element!("[srcset]", |el| {
         if let Some(srcset) = el.get_attribute("srcset") {
@@ -231,7 +252,60 @@ pub fn rewrite_html(
     if rewriter.end().is_err() {
         return None;
     }
-    Some(output)
+
+    // lol_html لا يمرر محتوى <noscript> بمعالجات العناصر — نعالج meta refresh
+    // نصياً على الناتج النهائي (حاجز enablejs لدى جوجل يستخدمه).
+    match String::from_utf8(output.clone()) {
+        Ok(s) => Some(rewrite_noscript_meta_refresh(&s, target, proxy_origin).into_bytes()),
+        Err(_) => Some(output),
+    }
+}
+
+/// معالجة نصية احتياطية: إعادة كتابة `url=` في `<meta http-equiv="refresh">`
+/// الذي سقط داخل `<noscript>` خارج نطاق معالجات lol_html.
+fn rewrite_noscript_meta_refresh(html: &str, target: &Url, proxy_origin: &str) -> String {
+    let mut out = String::with_capacity(html.len() + 128);
+    let mut rest = html;
+    while let Some(start) = rest.find("<meta") {
+        out.push_str(&rest[..start]);
+        let tag_rest = &rest[start..];
+        let Some(tag_end) = tag_rest.find('>') else {
+            out.push_str(tag_rest);
+            return out;
+        };
+        let end = start + tag_end + 1;
+        let tag = &rest[start..end];
+        let lower = tag.to_ascii_lowercase();
+        if lower.contains("http-equiv") && lower.contains("refresh") {
+            if let Some(pos) = tag.find("url=") {
+                let url_start = pos + 4;
+                let bs = tag.as_bytes();
+                let mut url_end = url_start;
+                while url_end < bs.len() {
+                    let c = bs[url_end] as char;
+                    if c.is_ascii_alphanumeric() || "/:?&=%-_~".contains(c) {
+                        url_end += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let link = &tag[url_start..url_end];
+                if should_rewrite(link) {
+                    if let Some(p) = proxy_url(proxy_origin, target, link) {
+                        out.push_str(&tag[..url_start]);
+                        out.push_str(&p);
+                        out.push_str(&tag[url_end..]);
+                        rest = &rest[end..];
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push_str(tag);
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// إعادة كتابة CSS: تحويل `url(...)` إلى روابط بروكسي مطلقة (عبر regex بسيط وسريع).
@@ -310,5 +384,21 @@ mod tests {
         let out = rewrite_css(css, &target(), "http://p.local:8080");
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("data:image/png"));
+    }
+}
+
+#[cfg(test)]
+mod tests_meta_noscript {
+    use super::*;
+    #[test]
+    fn meta_refresh_inside_noscript_is_rewritten() {
+        let target = Url::parse("https://www.google.com/search?q=x").unwrap();
+        let html = r#"<noscript><style>table{display:none}</style><meta content="0;url=/httpservice/retry/enablejs?sei=1" http-equiv="refresh"><div>click</div></noscript>"#;
+        let out = rewrite_html(html.as_bytes(), &target, "http://127.0.0.1:8081", 1_000_000).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(
+            s.contains(r#"content="0;url=http://127.0.0.1:8081/proxy?url=https://www.google.com/httpservice/retry/enablejs%3Fsei%3D1""#),
+            "meta inside noscript not rewritten:\n{s}"
+        );
     }
 }
